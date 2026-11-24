@@ -203,3 +203,89 @@ describe("milestones.burnup", function()
     restore()
   end)
 end)
+
+describe("milestones.all", function()
+  local restore
+
+  before_each(function()
+    require("tuleap.cache").invalidate()
+  end)
+
+  -- In after_each, so a failed assertion does not leave the stub behind.
+  after_each(function()
+    restore()
+  end)
+
+  it("lists sprints without a parent release after the releases", function()
+    restore = stub({
+      ["^/projects/%d+/milestones$"] = { { id = 10, label = "Release 1" } },
+      ["^/milestones/10/milestones$"] = { { id = 11, label = "Sprint 1" } },
+      ["^/projects/%d+/plannings$"] = { { id = 6 }, { id = 7 } },
+      ["^/plannings/6/milestones$"] = { { id = 10, label = "Release 1" } },
+      ["^/plannings/7/milestones$"] = {
+        { id = 21, label = "Orphan B" },
+        { id = 11, label = "Sprint 1" },
+        { id = 20, label = "Orphan A" },
+      },
+      ["^/milestones/20$"] = {
+        id = 20,
+        label = "Orphan A",
+        start_date = "2026-11-05T00:00:00+01:00",
+        end_date = "2026-11-19T00:00:00+01:00",
+      },
+    })
+    sync(function(done)
+      milestones.all(106, function(err, list)
+        assert.is_nil(err)
+        assert.same(
+          { 10, 11, 20, 21 },
+          vim.tbl_map(function(m)
+            return m.id
+          end, list)
+        )
+        -- Planning listings only carry id and label: the full milestone is read.
+        assert.equals("05/11/2026 → 19/11/2026", milestones.period(list[3]))
+        assert.equals(1, list[3].__depth)
+        -- No arrow without a release to point at; a real child keeps it.
+        assert.equals("Orphan A", milestones.label(list[3]))
+        assert.equals("  ↳ Sprint 1", milestones.label(list[2]))
+        -- A milestone that cannot be read is still listed.
+        assert.equals("Orphan B", milestones.label(list[4]))
+        done()
+      end)
+    end)
+  end)
+
+  it("finds sprints when the project has no release at all", function()
+    restore = stub({
+      ["^/projects/%d+/milestones$"] = {},
+      ["^/projects/%d+/plannings$"] = { { id = 7 } },
+      ["^/plannings/7/milestones$"] = { { id = 20, label = "Sprint" } },
+      ["^/milestones/20$"] = { id = 20, label = "Sprint", status_value = "Open" },
+    })
+    sync(function(done)
+      milestones.all(107, function(err, list)
+        assert.is_nil(err)
+        assert.equals(1, #list)
+        assert.equals(20, list[1].id)
+        assert.equals("Open", list[1].status_value)
+        done()
+      end)
+    end)
+  end)
+
+  it("keeps the releases when the plannings route is missing", function()
+    restore = stub({
+      ["^/projects/%d+/milestones$"] = { { id = 10, label = "Release 1" } },
+      ["^/milestones/10/milestones$"] = {},
+    }, { "^/projects/%d+/plannings$" })
+    sync(function(done)
+      milestones.all(108, function(err, list)
+        assert.is_nil(err)
+        assert.equals(1, #list)
+        assert.equals(10, list[1].id)
+        done()
+      end)
+    end)
+  end)
+end)

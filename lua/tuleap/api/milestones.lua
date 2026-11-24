@@ -162,7 +162,73 @@ function M.backlog(milestone_id, cb)
   client.paginate(("/milestones/%d/backlog"):format(milestone_id), nil, cb, { cache_ttl = 30 })
 end
 
---- Every sprint of a project: the top milestones plus their children.
+--- Replace each milestone reference by the full milestone, in place.
+---
+--- Planning listings only carry an id and a label; dates, status and the
+--- artifact are on `/milestones/{id}`. A reference that cannot be read is kept.
+---@param refs table[]
+---@param cb fun(milestones: table[])
+local function expand(refs, cb)
+  local pending = #refs
+  if pending == 0 then
+    return cb(refs)
+  end
+  for index, ref in ipairs(refs) do
+    M.get(ref.id, function(err, full)
+      if not err and type(full) == "table" then
+        full.__depth = ref.__depth
+        refs[index] = full
+      end
+      pending = pending - 1
+      if pending == 0 then
+        cb(refs)
+      end
+    end)
+  end
+end
+
+--- Milestones of the sub-plannings that no top milestone holds.
+---
+--- `/projects/{id}/milestones` only answers the top planning, so a sprint
+--- created without a parent release is never anyone's child. Each planning
+--- lists its own milestones, whatever their parent. A failure on either route,
+--- or an instance without them, just leaves nothing to add.
+---@param project_id integer
+---@param seen table<integer, boolean> ids already listed
+---@param cb fun(orphans: table[])
+local function orphans(project_id, seen, cb)
+  client.paginate(("/projects/%d/plannings"):format(project_id), nil, function(err, plannings)
+    plannings = not err and plannings or {}
+    local found = {}
+    local pending = #plannings
+    if pending == 0 then
+      return cb(found)
+    end
+    for _, planning in ipairs(plannings) do
+      client.paginate(("/plannings/%d/milestones"):format(planning.id), nil, function(merr, list)
+        for _, milestone in ipairs(not merr and list or {}) do
+          if milestone.id and not seen[milestone.id] then
+            seen[milestone.id] = true
+            -- Deeper than a release, so |tuleap.api.hierarchy| still prefers
+            -- it as an artifact's sprint.
+            milestone.__depth = 1
+            found[#found + 1] = milestone
+          end
+        end
+        pending = pending - 1
+        if pending == 0 then
+          table.sort(found, function(a, b)
+            return a.id < b.id
+          end)
+          expand(found, cb)
+        end
+      end, { cache_ttl = 60 })
+    end
+  end, { cache_ttl = 600 })
+end
+
+--- Every sprint of a project: the top milestones plus their children, then the
+--- sprints that have no parent at all.
 ---@param project_id integer
 ---@param cb fun(err: string?, milestones: table[]?)
 function M.all(project_id, cb)
@@ -171,11 +237,27 @@ function M.all(project_id, cb)
       return cb(err)
     end
     tops = tops or {}
-    if #tops == 0 then
-      return cb(nil, {})
-    end
     local out = {}
+
+    local function finish()
+      table.sort(out, function(a, b)
+        return a.order < b.order
+      end)
+      local flat, seen = {}, {}
+      for _, entry in ipairs(out) do
+        flat[#flat + 1] = entry.item
+        seen[entry.item.id] = true
+      end
+      orphans(project_id, seen, function(extra)
+        vim.list_extend(flat, extra)
+        cb(nil, flat)
+      end)
+    end
+
     local pending = #tops
+    if pending == 0 then
+      return finish()
+    end
     for index, top in ipairs(tops) do
       top.__depth = 0
       out[#out + 1] = { order = index * 1000, item = top }
@@ -189,14 +271,7 @@ function M.all(project_id, cb)
         end
         pending = pending - 1
         if pending == 0 then
-          table.sort(out, function(a, b)
-            return a.order < b.order
-          end)
-          local flat = {}
-          for _, entry in ipairs(out) do
-            flat[#flat + 1] = entry.item
-          end
-          cb(nil, flat)
+          finish()
         end
       end)
     end
@@ -412,7 +487,8 @@ end
 ---@param milestone table
 ---@return string
 function M.label(milestone)
-  local prefix = (milestone.__depth or 0) > 0 and "  ↳ " or ""
+  -- A sprint without a release is deep too, but has nothing to point at.
+  local prefix = (milestone.__depth or 0) > 0 and milestone.__parent and "  ↳ " or ""
   return prefix .. (milestone.label or milestone.title or ("milestone #" .. tostring(milestone.id)))
 end
 
