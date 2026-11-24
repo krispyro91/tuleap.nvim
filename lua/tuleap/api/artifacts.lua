@@ -29,7 +29,7 @@ end
 ---@field expert_query string? Tuleap TQL, e.g. `status = "Open" AND assigned_to = MYSELF()`
 ---@field limit integer?
 ---@field max_pages integer?
----@field values "all"|"summary"|nil
+---@field values "all"|""|nil `""` skips the field values (Tuleap rejects "summary")
 ---@field on_page fun(items: table[])? every artifact received so far, per page
 
 --- List artifacts of a tracker.
